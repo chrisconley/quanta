@@ -8,7 +8,7 @@ Billing-grade decimal arithmetic for Go. Calculate in high precision, round once
 
 ## The problem
 
-If you've built a billing, metering, or ledger system in Go, you've probably hit at least one of these:
+Recurring bugs in Go billing, metering, and ledger code:
 
 - **Invoice totals that don't match the sum of line items.** Tax got rounded before it was added, so the stored total is a cent off from `sum(lines)`.
 - **Splits that lose a penny.** `$10.00 / 3` rounds to `$3.33` three times, and the customer's statement is short `$0.01`.
@@ -18,7 +18,7 @@ If you've built a billing, metering, or ledger system in Go, you've probably hit
 
 `quanta` is the arithmetic layer for systems that care about these things. It is not a billing platform, not a double-entry ledger, and not a drop-in `decimal` replacement. It is a small set of domain types that make the right thing easy and the wrong thing a compile or runtime error.
 
-It's aimed at Go teams building **billing, metering, subscription, or payments systems** — places where the bugs above are career risks, not annoyances. If you just need precise decimal math without unit, rounding, and allocation domain types, reach for [`cockroachdb/apd`](https://github.com/cockroachdb/apd) (which `quanta` is built on) or [`shopspring/decimal`](https://github.com/shopspring/decimal) instead.
+It's aimed at Go teams building **billing, metering, subscription, or payments systems** — places where those bugs show up as cash discrepancies and customer tickets, not just dev-time annoyances. If you just need precise decimal math without unit, rounding, and allocation domain types, reach for [`cockroachdb/apd`](https://github.com/cockroachdb/apd) (which `quanta` is built on) or [`shopspring/decimal`](https://github.com/shopspring/decimal) instead.
 
 ## Scope
 
@@ -28,7 +28,14 @@ It's aimed at Go teams building **billing, metering, subscription, or payments s
 
 **Out of scope:** currency conversion / FX rates, tax engines, invoicing and billing orchestration, double-entry bookkeeping, event-stream metering, persistence and serialization format opinions, multi-currency arithmetic on a single `Measure`.
 
-The boundary is intentional. Pricing, ledgers, and metering pipelines all need exact math — but each has its own rules about history, equality, and audit. `quanta` gives you a typed value you can hand off to those systems and never wants it back.
+**Refused even in scope** — conveniences `quanta` deliberately does not offer, because they'd reintroduce the bugs the types are designed to prevent:
+
+- No rounding method on `Measure`. The only way to round is `Quantize`, which produces a `Quantized`.
+- No arithmetic on `Quantized`. Posted facts don't compute. If you want to keep calculating, you're in the wrong type.
+- No implicit unit coercion. `USD@0.01 + USD@0.001` fails — it does not silently rescale.
+- No public `apd` surface. Consumers cannot drop to the underlying decimal and bypass unit or rounding checks.
+
+The boundary is intentional. Pricing, ledgers, and metering pipelines all need exact math. Each has its own rules about history, equality, and audit. `quanta` gives you a typed value you can hand off to those systems and never wants it back.
 
 ## Install
 
@@ -67,6 +74,8 @@ func main() {
 }
 ```
 
+This snippet is `ExampleMeasure_Quantize` in [`example_test.go`](example_test.go). `go test -run=Example ./...` executes it and compares against a golden `// Output:` block, so it can't drift from the API without the test failing.
+
 ## Core idea: two types, one boundary
 
 ```
@@ -75,7 +84,7 @@ func main() {
 ```
 
 - **`Measure`** is a **working value**. High precision. Supports `Add`, `Sub`, `Mul`, `Div`. Use it inside calculations.
-- **`Quantized`** is a **posted fact**. Stored as an integer multiplier of the unit's quantum. No arithmetic — if you want to compute with it, you're in the wrong type. Use it at boundaries: database, API response, invoice row.
+- **`Quantized`** is a **posted fact**. Stored as an integer multiplier of the unit's quantum. No arithmetic. If you want to compute with it, you're in the wrong type. Use it at boundaries: database, API response, invoice row.
 - **`Quantize`** is the one-way bridge. Rounding happens here and nowhere else. It returns both the posted value **and** the remainder (the "dust") so you can audit it or reinject it later.
 
 This separation is the whole point. You can't accidentally round an intermediate result, because intermediate results are always `Measure`. And you can't accidentally keep computing with a posted value, because `Quantized` has no math.
@@ -184,17 +193,35 @@ cost  := usage.Mul(rate)                        // compute at token precision
   - `LargestRemainderStrategy` — dust-free, parts always sum to the quantized total.
   - `ProRataTruncateStrategy` — truncates each share and returns the remainder explicitly.
 - **Zero-dependency public API.** `apd` is an internal implementation detail; consumers never touch it.
-- **Comprehensive tests**: unit, integration, property-based (fuzz), and benchmarks.
+- **Tested** with unit, integration, property-based (fuzz), and benchmark suites.
+
+## Why not just…?
+
+### Why not `float64`?
+
+Binary floats can't represent `0.1` exactly, and the error compounds. `0.1 + 0.2 == 0.3` is false in Go. For anything that settles into a ledger or an invoice, that's not a rounding error you can afford to discover later.
+
+### Why not `int64` cents?
+
+Works fine for a single currency at a known minor unit. It breaks the moment you need intermediate high precision (tax rate × line item), sub-cent metering (per-token API billing), or multiple precisions for the same code (`USD@0.01` retail vs. `USD@0.001` wholesale). `quanta` lets you compute at full precision and still get exact equality on the posted values.
+
+### Why not `shopspring/decimal` or `cockroachdb/apd` directly?
+
+Those give you the math. They don't give you the type distinction between a **working value** and a **posted fact**, and they don't carry a unit. A `decimal.Decimal` will happily let you add dollars and euros, re-round a stored invoice total, or drop a penny in a split. `quanta` is a thin layer on top of `apd` that makes those mistakes mechanically impossible — `Measure` has no rounding method, `Quantized` has no arithmetic, and every operation checks unit compatibility.
+
+### Why not `Rhymond/go-money`?
+
+`go-money` is money-first: currency code and minor unit are coupled (USD is always cents), and one `Money` type covers both in-flight and stored values. `quanta` decouples unit code from precision — `USD@0.01` and `USD@0.001` are different units — and splits working values from posted facts. Pick `go-money` if your domain is ISO 4217 money at a single precision per currency; pick `quanta` if you need sub-cent work, unit-per-precision, or a type-level boundary between calculation and ledger.
 
 ## How it compares
 
-| You need… | Use |
-|---|---|
-| Raw decimal arithmetic, no domain concepts | [`cockroachdb/apd`](https://github.com/cockroachdb/apd), [`shopspring/decimal`](https://github.com/shopspring/decimal) |
-| Money-typed amounts with currency metadata | [`Rhymond/go-money`](https://github.com/Rhymond/go-money) |
-| **Working-vs-posted separation, unit safety, allocation** | **`quanta`** |
-| Double-entry bookkeeping | A ledger library (e.g. [`formancehq/ledger`](https://github.com/formancehq/ledger)) on top of `quanta` |
-| A full billing platform (metering, invoicing, dunning) | Lago, Kill Bill, OpenMeter |
+**[`cockroachdb/apd`](https://github.com/cockroachdb/apd) and [`shopspring/decimal`](https://github.com/shopspring/decimal)** — arbitrary-precision decimal libraries for Go. `apd` implements the IEEE 754 / General Decimal Arithmetic spec and is what `quanta` is built on; `shopspring/decimal` is the most widely used decimal library in the Go ecosystem. Neither knows anything about units, neither distinguishes a working value from a posted fact, and neither will stop you from adding dollars to euros. Pick one of these if you just need precise decimal math and you're keeping unit and rounding discipline elsewhere.
+
+**[`Rhymond/go-money`](https://github.com/Rhymond/go-money)** — a clean implementation of Martin Fowler's Money pattern, with currency-aware arithmetic and an `Allocate` method for splitting amounts. Precision is implicit in the currency, and there's no separate working-vs-posted type. Pick `go-money` if your domain is ISO 4217 money at a single precision per currency and you don't need to meter non-money quantities.
+
+**[`formancehq/ledger`](https://github.com/formancehq/ledger)** — a programmable double-entry ledger service with its own DSL for expressing financial transactions. It sits one layer above `quanta`: it answers "how much does each account owe whom?" whereas `quanta` answers "how is a single amount computed correctly?" Pick Formance if you need double-entry bookkeeping; you can still use `quanta` (or its ideas) inside a ledger entry calculation.
+
+**Lago, Kill Bill, OpenMeter** — full billing platforms that handle pricing, metering, invoicing, subscriptions, dunning, and payment integration. `quanta` is the size of a single function inside one of these; these are the size of a company. Pick a platform if you want to operate a billing system, not build one.
 
 ## API reference
 
@@ -213,6 +240,29 @@ Main types:
 | `Rounding` | One of seven rounding modes. |
 | `AllocationStrategy` | Interface implemented by `LargestRemainderStrategy` and `ProRataTruncateStrategy`. |
 
+## Repository layout
+
+Single package, flat layout:
+
+```
+Core types
+  decimal.go          Decimal — thin wrapper over cockroachdb/apd
+  quantum.go          Quantum — smallest meaningful increment for a unit
+  unit.go             Unit — code + quantum
+  measure.go          Measure — working values with high-precision arithmetic
+  quantized.go        Quantized — posted facts as integer multiples of a quantum
+
+Rounding and allocation
+  rounding.go         Seven rounding modes
+  allocation.go       AllocationStrategy interface
+  largestremainder.go Dust-free allocation
+  prorata.go          Truncate-with-remainder allocation
+
+Tests
+  example_test.go     Runnable, CI-verified README examples
+  *_test.go           Unit, integration, benchmark, fuzz, and gotcha tests
+```
+
 ## Development
 
 ```sh
@@ -228,7 +278,7 @@ Issues and pull requests are welcome. Before opening a PR, please run `go test .
 
 ## Credits
 
-`quanta` is built on [`cockroachdb/apd`](https://github.com/cockroachdb/apd) (Apache 2.0), which does the heavy lifting of decimal arithmetic. Thanks to its maintainers for a rock-solid foundation.
+`quanta` is built on [`cockroachdb/apd`](https://github.com/cockroachdb/apd) (Apache 2.0), which does the heavy lifting of decimal arithmetic. Thanks to its maintainers.
 
 ## License
 

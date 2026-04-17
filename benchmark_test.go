@@ -25,13 +25,10 @@ func BenchmarkDecimalAdd(b *testing.B) {
 		a.SetString("123.456789")
 		c := &apd.Decimal{}
 		c.SetString("987.654321")
-		ctx := &apd.Context{
-			Precision:   34,
-			Rounding:    apd.RoundHalfEven,
-			Traps:       apd.InvalidOperation | apd.DivisionByZero | apd.Overflow,
-			MaxExponent: apd.MaxExponent,
-			MinExponent: apd.MinExponent,
-		}
+		// Mirrors quanta's newCalcContext so the overhead comparison is honest.
+		ctx := apd.BaseContext.WithPrecision(34)
+		ctx.Rounding = apd.RoundHalfEven
+		ctx.Traps = apd.InvalidOperation | apd.DivisionByZero | apd.Overflow
 		var result apd.Decimal
 		for i := 0; i < b.N; i++ {
 			ctx.Add(&result, a, c)

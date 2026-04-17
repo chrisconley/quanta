@@ -856,3 +856,134 @@ func TestDecimal_FloorCeilingFrac_AllocationScenario(t *testing.T) {
 		assert.Equal(t, int64(0), dust)
 	})
 }
+
+// TestDecimal_Traps pins the behavior of every apd Condition reachable
+// through quanta's public API. The current trap set is
+//
+//	InvalidOperation | DivisionByZero | Overflow
+//
+// but this test characterizes *every* condition, not just the trapped ones.
+// Silent-today subtests will flip to errors if the trap set is widened (e.g.
+// adopting apd.DefaultTraps), making any such change a visible, reviewable
+// test diff rather than an invisible runtime behavior shift.
+//
+// Coverage is at the Decimal layer only — Measure, Floor, Ceiling, and
+// Quantize route through the same newCalcContext helper, so trap behavior
+// is characterized here transitively. See TestMeasure_TrapsPropagate for
+// the wrapper error-propagation smoke test.
+//
+// Condition taxonomy (apd v3):
+//
+//   - Trapped (errors today):
+//     DivisionByZero, Overflow, InvalidOperation
+//   - Hard-coded (errors regardless of traps, per apd Condition.GoError):
+//     SystemOverflow, SystemUnderflow
+//   - Signalled but not trapped (silent today):
+//     DivisionUndefined, Inexact, Rounded, (quiet NaN propagation)
+//   - Not reachable through quanta's public API (not tested):
+//     DivisionImpossible (only via QuoInteger, which quanta does not expose),
+//     standalone Subnormal (absorbed into SystemUnderflow at our magnitudes),
+//     Clamped (apd uses this internally for IEEE Emax clamping we do not hit).
+//
+// Note that quanta.NewDecimal accepts the strings "NaN", "sNaN", "Infinity",
+// and "-Infinity", so those inputs are part of the reachable surface. Whether
+// they *should* be accepted is a separate design question; today they are.
+func TestDecimal_Traps(t *testing.T) {
+	// --- Errors today (trapped or hard-coded) ---
+
+	t.Run("DivisionByZero errors on x/0", func(t *testing.T) {
+		_, err := MustNewDecimal("5").Div(Zero())
+
+		require.Error(t, err)
+		assert.ErrorContains(t, err, "div failed",
+			"quanta wraps the apd error with operation context")
+		assert.ErrorContains(t, err, "division by zero",
+			"the DivisionByZero condition should surface verbatim")
+	})
+
+	t.Run("Overflow errors when result exponent exceeds MaxExponent", func(t *testing.T) {
+		// 1E99999 * 1E99999 = 1E199998; apd.MaxExponent is 100000.
+		// Both SystemOverflow (hard-coded) and Overflow (trapped) fire.
+		huge := MustNewDecimal("1E99999")
+
+		_, err := huge.Mul(huge)
+
+		require.Error(t, err)
+		assert.ErrorContains(t, err, "mul failed")
+		assert.ErrorContains(t, err, "exponent out of range",
+			"apd uses this text for both System and regular Overflow")
+	})
+
+	t.Run("SystemUnderflow errors when result exponent falls below MinExponent", func(t *testing.T) {
+		// 1E-99999 * 1E-99999 = 1E-199998; apd.MinExponent is -100000.
+		// SystemUnderflow fires and is hard-coded to error even though
+		// Underflow is NOT in our trap set. Confirms that "very tiny results
+		// error" behavior survives any future trap-set narrowing.
+		tiny := MustNewDecimal("1E-99999")
+
+		_, err := tiny.Mul(tiny)
+
+		require.Error(t, err)
+		assert.ErrorContains(t, err, "mul failed")
+		assert.ErrorContains(t, err, "exponent out of range")
+	})
+
+	t.Run("InvalidOperation errors on signaling NaN input", func(t *testing.T) {
+		// sNaN in any arithmetic operand triggers InvalidOperation.
+		// A quiet NaN ("NaN") does NOT — see the "quiet NaN propagates" case.
+		_, err := MustNewDecimal("sNaN").Add(MustNewDecimal("1"))
+
+		require.Error(t, err)
+		assert.ErrorContains(t, err, "add failed")
+		assert.ErrorContains(t, err, "invalid operation")
+	})
+
+	t.Run("InvalidOperation errors on Infinity - Infinity", func(t *testing.T) {
+		// Inf - Inf is mathematically undefined and triggers InvalidOperation.
+		// Inf + Inf = Inf (no signal); only the undefined cases trap.
+		inf := MustNewDecimal("Infinity")
+
+		_, err := inf.Sub(inf)
+
+		require.Error(t, err)
+		assert.ErrorContains(t, err, "sub failed")
+		assert.ErrorContains(t, err, "invalid operation")
+	})
+
+	// --- Silent today (would flip to errors under a widened trap set) ---
+
+	t.Run("DivisionUndefined silently returns NaN on 0/0", func(t *testing.T) {
+		// 0/0 is DivisionUndefined in apd, which is NOT in our narrow trap
+		// set but IS in apd.DefaultTraps. Adopting DefaultTraps flips this
+		// subtest to an error case — that's the intended visibility.
+		result, err := Zero().Div(Zero())
+
+		require.NoError(t, err,
+			"DivisionUndefined is not in the current narrow trap set")
+		assert.Equal(t, "NaN", result.String(),
+			"untrapped DivisionUndefined produces a NaN result")
+	})
+
+	t.Run("quiet NaN propagates silently through arithmetic", func(t *testing.T) {
+		// IEEE 754 behavior: quiet NaN as an operand yields NaN with NO
+		// condition flag raised. Distinct from sNaN which DOES signal.
+		// This is normal/correct behavior even under apd.DefaultTraps —
+		// the way to guard against this is validating inputs, not traps.
+		result, err := MustNewDecimal("NaN").Add(MustNewDecimal("1"))
+
+		require.NoError(t, err)
+		assert.Equal(t, "NaN", result.String())
+	})
+
+	t.Run("Inexact silently rounds to 34 significant digits", func(t *testing.T) {
+		// Inexact and Rounded fire on 10/3. Neither is in apd.DefaultTraps
+		// — trapping them would make basic arithmetic unusable. This subtest
+		// pins that 10/3 produces a 34-digit approximation with no error,
+		// even after any reasonable trap-set change.
+		result, err := MustNewDecimal("10").Div(MustNewDecimal("3"))
+
+		require.NoError(t, err)
+		assert.Equal(t, "3.333333333333333333333333333333333", result.String(),
+			"34 significant digits per decimal128 precision")
+	})
+}

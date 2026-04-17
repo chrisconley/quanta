@@ -28,11 +28,7 @@ func TestGotcha_InPlaceMutation(t *testing.T) {
 	taxRate := new(apd.Decimal)
 	taxRate.SetString("0.08875")
 
-	ctx := &apd.Context{
-		Precision: 34,
-		Rounding:  apd.RoundHalfEven,
-		Traps:     apd.InvalidOperation | apd.DivisionByZero | apd.Overflow,
-	}
+	ctx := apd.BaseContext.WithPrecision(34)
 
 	// Compute tax using price as the destination — original price is gone
 	expectedProduct := new(apd.Decimal)
@@ -129,4 +125,70 @@ func TestGotcha_SilentPrecisionLoss(t *testing.T) {
 	assert.True(t,
 		pResult.Equal(quanta.MustNewDecimal("33.33333333333333333333333333333333")),
 		"quanta: 34 digits — enough for any financial calculation")
+}
+
+// TestGotcha_SharedApdDecimalAcrossGoroutines demonstrates why sharing an
+// *apd.Decimal across goroutines is hazardous. apd's destination-pointer
+// pattern makes it easy to accidentally mutate a value another goroutine
+// is reading — any such mutation is a data race on the underlying
+// big.Int coefficient slice that `go test -race` will flag.
+//
+// The test is sequenced so it does not itself trigger the race detector;
+// the comments show the concurrent scenario it warns against. The
+// companion tests in concurrency_test.go run the equivalent quanta
+// workloads under -race and pass.
+//
+// Tradeoff: quanta types are immutable and have no destination-pointer
+// API. Sharing a Decimal, Measure, or Quantized across goroutines is safe
+// by construction — there is no write any reader could race with.
+func TestGotcha_SharedApdDecimalAcrossGoroutines(t *testing.T) {
+	// --- apd: sharing an *apd.Decimal invites silent mutation ---
+	shared := new(apd.Decimal)
+	shared.SetString("19.99")
+
+	ctx := &apd.Context{
+		Precision:   34,
+		Rounding:    apd.RoundHalfEven,
+		Traps:       apd.InvalidOperation | apd.DivisionByZero | apd.Overflow,
+		MaxExponent: apd.MaxExponent,
+		MinExponent: apd.MinExponent,
+	}
+
+	// Imagine goroutine A: reads `shared` to compute a tax amount.
+	var taxed apd.Decimal
+	rate := new(apd.Decimal)
+	rate.SetString("1.08875")
+	ctx.Mul(&taxed, shared, rate) // reads shared.Coeff
+
+	expectedTaxed := new(apd.Decimal)
+	expectedTaxed.SetString("21.7641125")
+	assert.Equal(t, 0, taxed.Cmp(expectedTaxed))
+
+	// Imagine goroutine B: an innocent-looking "apply a $1 bonus" update
+	// that aliases `shared` as both source and destination. Idiomatic apd.
+	bonus := new(apd.Decimal)
+	bonus.SetString("1.00")
+	ctx.Add(shared, shared, bonus) // writes shared.Coeff
+
+	// Concurrently, goroutine B's write races with goroutine A's read on
+	// shared.Coeff's big.Int slice — `go test -race` reports a data race.
+	// Worse, every other holder of `shared` now silently sees the new
+	// value with no way to detect the change.
+	expectedShared := new(apd.Decimal)
+	expectedShared.SetString("20.99")
+	assert.Equal(t, 0, shared.Cmp(expectedShared),
+		"apd: `shared` mutated underneath anyone still holding it")
+
+	// --- quanta: immutable values, arithmetic always returns new values ---
+	qShared := quanta.MustNewDecimal("19.99")
+	qRate := quanta.MustNewDecimal("1.08875")
+	qBonus := quanta.MustNewDecimal("1.00")
+
+	qTaxed, _ := qShared.Mul(qRate)
+	qUpdated, _ := qShared.Add(qBonus)
+
+	assert.True(t, qTaxed.Equal(quanta.MustNewDecimal("21.7641125")))
+	assert.True(t, qUpdated.Equal(quanta.MustNewDecimal("20.99")))
+	assert.True(t, qShared.Equal(quanta.MustNewDecimal("19.99")),
+		"quanta: `qShared` is unchanged — every goroutine sees the same value")
 }
