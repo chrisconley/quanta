@@ -57,13 +57,7 @@ func deprecatedNewQuantized(unit Unit, quantity Decimal, rounding Rounding) Quan
 	quantum := unit.Quantum().Decimal()
 
 	// Divide value by quantum to get multiplier
-	ctx := &apd.Context{
-		Precision:   34,
-		Rounding:    rounding.toAPDRounder(),
-		Traps:       apd.InvalidOperation | apd.DivisionByZero | apd.Overflow,
-		MaxExponent: apd.MaxExponent,
-		MinExponent: apd.MinExponent,
-	}
+	ctx := newCalcContext(rounding.toAPDRounder())
 
 	var quotient apd.Decimal
 	_, err := ctx.Quo(&quotient, quantity.toAPD(), quantum.toAPD())

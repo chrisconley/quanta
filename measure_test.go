@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestNewMeasure(t *testing.T) {
@@ -449,4 +450,22 @@ func TestMeasure_Equality(t *testing.T) {
 		b := NewMeasureFrom(usdFine, MustNewDecimal("100.00"))
 		assert.False(t, a.Equal(b))
 	})
+}
+
+// TestMeasure_TrapsPropagate is a smoke test that Decimal-layer trap errors
+// surface through Measure's wrapper methods with both the quanta-level and
+// apd-level context intact. Trap behavior itself is exhaustively characterized
+// at the Decimal layer in TestDecimal_Traps — this test defends the
+// error-propagation contract, not the trap set.
+func TestMeasure_TrapsPropagate(t *testing.T) {
+	usd := MustNewUnit("USD", "0.01")
+	m := NewMeasureFrom(usd, MustNewDecimal("100.00"))
+
+	_, err := m.Div(Zero())
+
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "error dividing value",
+		"Measure should wrap Decimal errors with its own context")
+	assert.ErrorContains(t, err, "division by zero",
+		"the underlying apd trap condition should remain visible in the chain")
 }

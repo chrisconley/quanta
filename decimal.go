@@ -13,17 +13,19 @@ type Decimal struct {
 	_ [0]func() // Makes the struct non-comparable, preventing errors using == or !=
 }
 
-// defaultCalcContext returns the default context for high-precision decimal calculations.
-// Uses IEEE 754 decimal128 precision (34 digits) with banker's rounding and traps
-// for critical errors.
-func defaultCalcContext() *apd.Context {
-	return &apd.Context{
-		Precision:   34, // IEEE 754 decimal128 precision
-		Rounding:    apd.RoundHalfEven,
-		Traps:       apd.InvalidOperation | apd.DivisionByZero | apd.Overflow,
-		MaxExponent: apd.MaxExponent,
-		MinExponent: apd.MinExponent,
-	}
+// newCalcContext returns a context for high-precision decimal calculations
+// with the given rounding mode. Uses IEEE 754 decimal128 precision (34 digits)
+// and traps InvalidOperation, DivisionByZero, and Overflow so those surface
+// as Go errors rather than silent flagged results.
+//
+// Built on apd.BaseContext (which sets MaxExponent/MinExponent to the package
+// defaults and starts with DefaultTraps); we then override Rounding and
+// narrow the trap set to quanta's chosen subset.
+func newCalcContext(rounding apd.Rounder) *apd.Context {
+	ctx := apd.BaseContext.WithPrecision(34)
+	ctx.Rounding = rounding
+	ctx.Traps = apd.InvalidOperation | apd.DivisionByZero | apd.Overflow
+	return ctx
 }
 
 // NewDecimal creates a new Decimal from a string representation
@@ -102,7 +104,7 @@ func (d Decimal) Cmp(other Decimal) int {
 // Add returns a new Decimal that is the sum of d and other.
 func (d Decimal) Add(other Decimal) (Decimal, error) {
 	var result apd.Decimal
-	ctx := defaultCalcContext()
+	ctx := newCalcContext(apd.RoundHalfEven)
 	_, err := ctx.Add(&result, &d.v, &other.v)
 	if err != nil {
 		return Decimal{}, fmt.Errorf("add failed: %w", err)
@@ -113,7 +115,7 @@ func (d Decimal) Add(other Decimal) (Decimal, error) {
 // Sub returns a new Decimal that is the difference of d and other.
 func (d Decimal) Sub(other Decimal) (Decimal, error) {
 	var result apd.Decimal
-	ctx := defaultCalcContext()
+	ctx := newCalcContext(apd.RoundHalfEven)
 	_, err := ctx.Sub(&result, &d.v, &other.v)
 	if err != nil {
 		return Decimal{}, fmt.Errorf("sub failed: %w", err)
@@ -124,7 +126,7 @@ func (d Decimal) Sub(other Decimal) (Decimal, error) {
 // Mul returns a new Decimal that is the product of d and other.
 func (d Decimal) Mul(other Decimal) (Decimal, error) {
 	var result apd.Decimal
-	ctx := defaultCalcContext()
+	ctx := newCalcContext(apd.RoundHalfEven)
 	_, err := ctx.Mul(&result, &d.v, &other.v)
 	if err != nil {
 		return Decimal{}, fmt.Errorf("mul failed: %w", err)
@@ -135,7 +137,7 @@ func (d Decimal) Mul(other Decimal) (Decimal, error) {
 // Div returns a new Decimal that is the quotient of d divided by other.
 func (d Decimal) Div(other Decimal) (Decimal, error) {
 	var result apd.Decimal
-	ctx := defaultCalcContext()
+	ctx := newCalcContext(apd.RoundHalfEven)
 	_, err := ctx.Quo(&result, &d.v, &other.v)
 	if err != nil {
 		return Decimal{}, fmt.Errorf("div failed: %w", err)
@@ -153,13 +155,7 @@ func (d Decimal) Div(other Decimal) (Decimal, error) {
 //	MustNewDecimal("-12.2").Floor()  → -13
 //	MustNewDecimal("-12.8").Floor()  → -13
 func (d Decimal) Floor() int64 {
-	ctx := &apd.Context{
-		Precision:   34,
-		Rounding:    apd.RoundFloor,
-		Traps:       apd.InvalidOperation | apd.DivisionByZero | apd.Overflow,
-		MaxExponent: apd.MaxExponent,
-		MinExponent: apd.MinExponent,
-	}
+	ctx := newCalcContext(apd.RoundFloor)
 
 	var rounded apd.Decimal
 	_, err := ctx.RoundToIntegralValue(&rounded, &d.v)
@@ -185,13 +181,7 @@ func (d Decimal) Floor() int64 {
 //	MustNewDecimal("-12.8").Ceiling()  → -12
 //	MustNewDecimal("-12.2").Ceiling()  → -12
 func (d Decimal) Ceiling() int64 {
-	ctx := &apd.Context{
-		Precision:   34,
-		Rounding:    apd.RoundCeiling,
-		Traps:       apd.InvalidOperation | apd.DivisionByZero | apd.Overflow,
-		MaxExponent: apd.MaxExponent,
-		MinExponent: apd.MinExponent,
-	}
+	ctx := newCalcContext(apd.RoundCeiling)
 
 	var rounded apd.Decimal
 	_, err := ctx.RoundToIntegralValue(&rounded, &d.v)
