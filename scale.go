@@ -72,10 +72,23 @@ func MustNewScale(spec ScaleSpec) Scale {
 }
 
 // NewScaleFrom creates a Scale from already-constructed domain objects.
-// No validation — trust the caller that input and output are valid Units.
-// Mirrors NewMeasureFrom for composing Scales inside the package.
-func NewScaleFrom(input Unit, output Unit, factor Decimal) Scale {
-	return Scale{input: input, output: output, factor: factor}
+// Trusts the caller that each argument is already valid (per-field checks
+// live in the value object constructors). Returns (Scale, error) so future
+// cross-field invariants (e.g., distinct input/output codes) have a home
+// without changing the signature.
+func NewScaleFrom(input Unit, output Unit, factor Decimal) (Scale, error) {
+	return Scale{input: input, output: output, factor: factor}, nil
+}
+
+// MustNewScaleFrom creates a Scale from already-constructed domain objects.
+// Panics if NewScaleFrom returns an error. Use for testing and known-valid
+// in-package composition.
+func MustNewScaleFrom(input Unit, output Unit, factor Decimal) Scale {
+	s, err := NewScaleFrom(input, output, factor)
+	if err != nil {
+		panic(err)
+	}
+	return s
 }
 
 // InputUnit returns the unit the Scale expects as input.
@@ -111,4 +124,9 @@ func (s Scale) Equal(other Scale) bool {
 	return s.input.Equal(other.input) &&
 		s.output.Equal(other.output) &&
 		s.factor.Equal(other.factor)
+}
+
+// String returns a human-readable representation of the scale.
+func (s Scale) String() string {
+	return fmt.Sprintf("Scale[%s -> %s @ %s]", s.input.String(), s.output.String(), s.factor.String())
 }
