@@ -13,42 +13,69 @@ import "fmt"
 //
 // Example:
 //
-//	tokens := MustNewUnit("tokens", "1")
-//	usd := MustNewUnit("USD", "0.01")
-//	rate := MustNewScale(tokens, usd, MustNewDecimal("0.05"))
+//	rate := MustNewScale(ScaleSpec{
+//	    Input:  UnitSpec{Code: "tokens", Quantum: "1"},
+//	    Output: UnitSpec{Code: "USD", Quantum: "0.01"},
+//	    Factor: "0.05",
+//	})
 //
-//	usage := NewMeasureFrom(tokens, MustNewDecimal("1000"))
+//	usage := MustNewMeasure(MeasureSpec{
+//	    Unit:     UnitSpec{Code: "tokens", Quantum: "1"},
+//	    Quantity: "1000",
+//	})
 //	cost, _ := rate.Apply(usage) // 50 USD
 //
-//	wrongUnit := NewMeasureFrom(MustNewUnit("credits", "1"), MustNewDecimal("1000"))
-//	_, err := rate.Apply(wrongUnit) // error: incompatible input unit
+//	wrong := MustNewMeasure(MeasureSpec{
+//	    Unit:     UnitSpec{Code: "credits", Quantum: "1"},
+//	    Quantity: "1000",
+//	})
+//	_, err := rate.Apply(wrong) // error: incompatible input unit
 type Scale struct {
 	input  Unit
 	output Unit
 	factor Decimal
 }
 
-// NewScale creates a Scale from the input unit, output unit, and factor.
-// Returns an error if either unit has an empty code (the zero value).
-// The factor may be any Decimal, including zero or negative.
-func NewScale(input Unit, output Unit, factor Decimal) (Scale, error) {
-	if input.Code() == "" {
-		return Scale{}, fmt.Errorf("scale input unit must not be empty")
+// ScaleSpec carries primitive construction data for a Scale.
+type ScaleSpec struct {
+	Input  UnitSpec
+	Output UnitSpec
+	Factor string
+}
+
+// NewScale creates a Scale from a primitive-only spec.
+// Returns an error if any field is invalid.
+func NewScale(spec ScaleSpec) (Scale, error) {
+	input, err := NewUnit(spec.Input.Code, spec.Input.Quantum)
+	if err != nil {
+		return Scale{}, fmt.Errorf("invalid input unit: %w", err)
 	}
-	if output.Code() == "" {
-		return Scale{}, fmt.Errorf("scale output unit must not be empty")
+	output, err := NewUnit(spec.Output.Code, spec.Output.Quantum)
+	if err != nil {
+		return Scale{}, fmt.Errorf("invalid output unit: %w", err)
+	}
+	factor, err := NewDecimal(spec.Factor)
+	if err != nil {
+		return Scale{}, fmt.Errorf("invalid factor: %w", err)
 	}
 	return Scale{input: input, output: output, factor: factor}, nil
 }
 
-// MustNewScale creates a Scale and panics if construction fails.
-// Use for tests and known-valid constants.
-func MustNewScale(input Unit, output Unit, factor Decimal) Scale {
-	s, err := NewScale(input, output, factor)
+// MustNewScale creates a Scale from a primitive-only spec.
+// Panics if the spec is invalid. Use for testing and known-valid constants.
+func MustNewScale(spec ScaleSpec) Scale {
+	s, err := NewScale(spec)
 	if err != nil {
 		panic(err)
 	}
 	return s
+}
+
+// NewScaleFrom creates a Scale from already-constructed domain objects.
+// No validation — trust the caller that input and output are valid Units.
+// Mirrors NewMeasureFrom for composing Scales inside the package.
+func NewScaleFrom(input Unit, output Unit, factor Decimal) Scale {
+	return Scale{input: input, output: output, factor: factor}
 }
 
 // InputUnit returns the unit the Scale expects as input.
